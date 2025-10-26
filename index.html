@@ -1,0 +1,182 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>FSGAME Loader</title>
+<style>
+  body {
+    background: #111;
+    color: #eee;
+    font-family: system-ui, sans-serif;
+    display: flex;
+    flex-direction: column;
+    align-items: center;
+    justify-content: center;
+    height: 100vh;
+    margin: 0;
+  }
+  input[type="file"] {
+    margin-bottom: 1em;
+    z-index: 10;
+  }
+  iframe {
+    width: 90%;
+    height: 80vh;
+    border: 2px solid #444;
+    border-radius: 8px;
+    background: #000;
+  }
+  .dropzone {
+    border: 2px dashed #555;
+    border-radius: 12px;
+    padding: 2em;
+    text-align: center;
+    width: 300px;
+    transition: background 0.3s, border-color 0.3s;
+  }
+  .dropzone.dragover {
+    background: rgba(255,255,255,0.1);
+    border-color: #0f0;
+  }
+</style>
+</head>
+<body>
+<h1>🕹️ FSGAME Loader</h1>
+<div id="dropzone" class="dropzone">
+  <p>Drag & Drop your <strong>.fsgame</strong> files here<br>or click below:</p>
+  <input type="file" id="fileInput" accept=".fsgame,.fsgame.part*" multiple />
+</div>
+<iframe id="gameFrame"></iframe>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/pako/2.1.0/pako.min.js"></script>
+<script>
+const input = document.getElementById("fileInput");
+const iframe = document.getElementById("gameFrame");
+const dropzone = document.getElementById("dropzone");
+let virtualFiles = {};
+
+input.addEventListener("change", e => handleFiles(e.target.files));
+
+dropzone.addEventListener("dragover", e => {
+  e.preventDefault();
+  dropzone.classList.add("dragover");
+});
+
+dropzone.addEventListener("dragleave", () => {
+  dropzone.classList.remove("dragover");
+});
+
+dropzone.addEventListener("drop", e => {
+  e.preventDefault();
+  dropzone.classList.remove("dragover");
+  const files = Array.from(e.dataTransfer.files);
+  const validFiles = files.filter(f => f.name.includes(".fsgame"));
+  if (validFiles.length > 0) handleFiles(validFiles);
+  else alert("Please drop a valid .fsgame or .fsgame.part file.");
+});
+
+async function handleFiles(fileList) {
+  const files = Array.from(fileList);
+  if (files.length === 0) return;
+
+  // Sort parts by .partN number
+  files.sort((a, b) => getPartNumber(a.name) - getPartNumber(b.name));
+  console.log("Processing parts:", files.map(f => f.name));
+
+  virtualFiles = {}; // reset
+
+  // Merge all parts in memory
+  let totalLength = files.reduce((sum, f) => sum + f.size, 0);
+  let combinedBuffer = new Uint8Array(totalLength);
+  let offset = 0;
+
+  for (const file of files) {
+    const buf = new Uint8Array(await file.arrayBuffer());
+    combinedBuffer.set(buf, offset);
+    offset += buf.length;
+  }
+
+  // Unpack the combined archive
+  virtualFiles = await unpackFSGAME(combinedBuffer.buffer);
+  console.log("All files unpacked:", Object.keys(virtualFiles));
+
+  // Load index.html from virtualFiles into iframe using a blob URL
+  const indexBlob = virtualFiles['index.html'] || virtualFiles['fsgame/index.html'];
+  if (!indexBlob) {
+    alert("index.html not found in the archive!");
+    return;
+  }
+
+  const url = URL.createObjectURL(indexBlob);
+  iframe.src = url;
+
+  // Register Service Worker after unpacking
+  await registerServiceWorker();
+}
+
+function getPartNumber(filename) {
+  const match = filename.match(/\.part(\d+)$/);
+  return match ? parseInt(match[1], 10) : 1;
+}
+
+async function unpackFSGAME(arrayBuffer) {
+  const view = new DataView(arrayBuffer);
+  let offset = 0;
+
+  const version = view.getUint32(offset, true);
+  offset += 4;
+  const fileCount = view.getUint32(offset, true);
+  offset += 4;
+
+  const files = {};
+  for (let i = 0; i < fileCount; i++) {
+    const nameLen = view.getUint16(offset, true);
+    offset += 2;
+    const nameBytes = new Uint8Array(arrayBuffer, offset, nameLen);
+    offset += nameLen;
+    const name = new TextDecoder().decode(nameBytes);
+
+    const compSize = view.getUint32(offset, true);
+    offset += 4;
+    const origSize = view.getUint32(offset, true);
+    offset += 4;
+    const mtime = view.getUint32(offset, true);
+    offset += 4;
+
+    const data = new Uint8Array(arrayBuffer, offset, compSize);
+    offset += compSize;
+
+    const blob = new Blob([pako.inflate(data)], { type: getType(name) });
+    files[name] = blob;
+  }
+
+  return files;
+}
+
+function getType(name) {
+  if (name.endsWith(".html")) return "text/html";
+  if (name.endsWith(".js")) return "application/javascript";
+  if (name.endsWith(".css")) return "text/css";
+  if (name.endsWith(".png")) return "image/png";
+  if (name.endsWith(".jpg") || name.endsWith(".jpeg")) return "image/jpeg";
+  if (name.endsWith(".json")) return "application/json";
+  return "application/octet-stream";
+}
+
+// ------------------ SERVICE WORKER ------------------
+async function registerServiceWorker() {
+  if ("serviceWorker" in navigator) {
+    try {
+      const reg = await navigator.serviceWorker.register("./sw.js", { scope: "/" });
+      console.log("Service Worker registered:", reg);
+    } catch (err) {
+      console.error("Service Worker registration failed:", err);
+    }
+  } else {
+    console.warn("Service Workers are not supported in this browser.");
+  }
+}
+</script>
+</body>
+</html>
